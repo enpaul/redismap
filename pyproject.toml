@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "redismap"
-version = "0.0.0"
+version = "0.1.0"
 description = "A Redis wrapper that lets Redis be used as a python mapping"
 authors = ["Ethan Paul <24588726+enpaul@users.noreply.github.com>"]
 repository = "https://github.com/enpaul/redismap/"
