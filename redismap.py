@@ -1,13 +1,16 @@
 """Wrapper for Redis servers to support using a server as a python mapping"""
 import datetime
 import json
+from collections.abc import MutableMapping
 from typing import Any
 from typing import Dict
 from typing import Generator
 from typing import Iterable
+from typing import Iterator
 from typing import List
-from typing import MutableMapping
+from typing import Mapping
 from typing import Optional
+from typing import Set
 from typing import Tuple
 from typing import Union
 
@@ -27,6 +30,8 @@ JSONBaseType = Optional[Union[int, float, bool, List, Dict]]
 JSONValue = Union[List[JSONBaseType], Dict[str, JSONBaseType]]
 
 RedisValue = Union[str, int, float, JSONValue]
+
+NAMESPACE_DELIMITER = "::"
 
 
 class RedisMapException(Exception):
@@ -118,13 +123,16 @@ class RedisMap(MutableMapping):
                 return json.loads(value)
             raise KeyError(f"No key '{key}' in the Redis schema")
         except json.JSONDecodeError as err:
-            raise ValueError(f"Invalid JSON in redis schema: {err}")
+            raise ValueError("Invalid JSON in redis schema") from err
 
     def __setitem__(self, key: str, value: RedisValue) -> None:
         self._check_connection()
+        if not isinstance(key, str):
+            raise TypeError(f"Redis keys must be strings, recieved '{type(key)}'")
+
         try:
             self._database.set(
-                self._expand_key(key), json.dumps(value), ex=self.expiration_seconds
+                self._expand_key(key), json.dumps(value), ex=self.expiration
             )
         except json.JSONDecodeError as err:
             raise ValueError(
@@ -138,11 +146,13 @@ class RedisMap(MutableMapping):
             raise KeyError(f"No key '{key}' in the Redis schema")
         self._database.delete(full_key)
 
-    def __iter__(self) -> Iterable[str]:
+    def __iter__(self) -> Iterator[str]:
         return iter(self.keys())
 
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: Any) -> bool:
         self._check_connection()
+        if not isinstance(key, str):
+            return False
         return self._database.exists(self._expand_key(key)) == 1
 
     def _expand_key(self, key: str) -> str:
@@ -156,7 +166,9 @@ class RedisMap(MutableMapping):
         """
         if not isinstance(key, str):
             raise TypeError(f"Redis keys must be of type 'str', got '{type(key)}'")
-        return f"{self._namespace}:{key}" if self._namespace else key
+        return (
+            f"{self._namespace}{NAMESPACE_DELIMITER}{key}" if self._namespace else key
+        )
 
     def _check_connection(self):
         """Checks that the redis connection is configured and accessible
@@ -191,12 +203,6 @@ class RedisMap(MutableMapping):
     def expiration(self) -> Optional[datetime.timedelta]:
         """Returns the optional expiration time applied to keys set by the wrapper"""
         return self._expiration
-
-    @property
-    def expiration_seconds(self) -> Optional[float]:
-        return (
-            self._expiration.total_seconds() if self._expiration is not None else None
-        )
 
     def initialize(self, *args, **kwargs):
         """Initialize the connection to the database after the wrapper is created
@@ -236,21 +242,21 @@ class RedisMap(MutableMapping):
         except KeyError:
             return default
 
-    def keys(self) -> List[str]:
+    def keys(self) -> Set[str]:
         """Iterates over the keys in the database"""
 
         self._check_connection()
-        keys = (
+        keys = set()
+        for key in (
             self._database.keys()
             if self._namespace is None
-            else self._database.keys(f"{self._namespace}:*")
-        )
-        return [
-            key.decode().replace(f"{self._namespace}:", "")
-            if self._namespace is not None
-            else key.decode()
-            for key in keys
-        ]
+            else self._database.keys(f"{self._namespace}{NAMESPACE_DELIMITER}*")
+        ):
+            keys.add(
+                key.decode().replace(f"{self._namespace}{NAMESPACE_DELIMITER}", "")
+            )
+
+        return keys
 
     def values(self) -> Generator[RedisValue, None, None]:
         """Iterates over the values in the database
@@ -274,10 +280,30 @@ class RedisMap(MutableMapping):
         for key in self.keys():
             yield (key, self[key])
 
-    def update(self, data: Dict[str, RedisValue]):
+    # The signatures do match, but pylint wants the '/' to be there to denote positional only
+    # arguments. This syntax is only compatible with python3.8+
+    def update(  # pylint: disable=arguments-differ
+        self,
+        other=(),
+        **kwargs,
+    ) -> None:
         """Updates the database from a dictionary, overwriting keys as necessary"""
         self._check_connection()
-        for key, value in data.items():
+
+        if hasattr(other, "keys"):
+            for key in other:
+                self._database.set(
+                    self._expand_key(key),
+                    json.dumps(other[key]),
+                    ex=self.expiration,
+                )
+        else:
+            for key, value in other:
+                self._database.set(
+                    self._expand_key(key), json.dumps(value), ex=self.expiration
+                )
+
+        for key, value in kwargs.items():
             self._database.set(
-                self._expand_key(key), json.dumps(value), ex=self.expiration_seconds
+                self._expand_key(key), json.dumps(value), ex=self.expiration
             )
